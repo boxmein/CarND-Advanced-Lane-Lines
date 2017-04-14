@@ -4,6 +4,9 @@ import cv2
 import pickle
 import math
 import os
+from moviepy.editor import VideoFileClip
+from collections import deque
+
 
 DEBUG = True
 
@@ -11,6 +14,9 @@ SAT_THRESH = (120, 255)
 LIG_THRESH = (40, 255) 
 SOBEL_ORIENT = 'x'
 SOBEL_THRESH = (12, 255)
+
+LANE_WIDTH = 3.7
+LANE_HEIGHT = 30
 
 TRANSFORM_SRC = np.array([
     [577, 464],
@@ -28,6 +34,10 @@ TRANSFORM_DST = np.array([
 
 TRANSFORM = cv2.getPerspectiveTransform(TRANSFORM_SRC, TRANSFORM_DST)
 INV_TRANSFORM = cv2.getPerspectiveTransform(TRANSFORM_DST, TRANSFORM_SRC)
+
+Y_M_PX = 30/720 # meters per pixel in y dimension
+X_M_PX = 3.7/700 # meters per pixel in x dimension
+
 
 def abs_sobel_thresh(img, orient=SOBEL_ORIENT, thresh=SOBEL_THRESH):
     # Apply the following steps to img
@@ -93,14 +103,66 @@ def process(image):
     cv2.imshow("Thresh", img * 255)
 
     print("Transforming", img.shape)
-    img = transform_pipeline(img) 
+    img = transform_pipeline(img)
 
     cv2.imshow("Transform", img * 255)
     return img
 
 class LaneFinder:
     def __init__(self):
-        pass
+        self.we_good = False
+        self.recent_xfitted = deque(maxlen=10)
+        self.left_fit = None
+        self.right_fit = None
+        
+        self.radius = None
+        self.distance_from_line = None
+
+        self.ploty = np.linspace(0, 719, 720 )
+    
+    def get_best_fit(self):
+        
+        avgl = np.zeros(3)
+        avgr = np.zeros(3)
+
+        for lfit, rfit in recent_xfitted:
+            avgl += lfit
+            avgr += rfit
+        
+        avgl /= len(recent_xfitted)
+        avgr /= len(recent_xfitted)
+
+        return avgl, avgr
+    
+    def metric_fit(self):
+        # Fit new polynomials to x,y in world space
+        left_fit_cr = np.polyfit(self.ploty*Y_M_PX, self.left_fitx*X_M_PX, 2)
+        right_fit_cr = np.polyfit(self.ploty*Y_M_PX, self.right_fitx*X_M_PX, 2)
+        # Calculate the new radii of curvature
+        left_curverad = self.find_curve_radius(left_fit_cr)
+        right_curverad = self.find_curve_radius(right_fit_cr)
+        # Now our radius of curvature is in meters
+        print(left_curverad, 'm', right_curverad, 'm')
+        # Example values: 632.1 m    626.2 m
+        return left_curverad, right_curverad
+
+    def find_curve_radius(self, fit, y=720):
+        A, B, C = fit
+        radius = (1 + (2 * A * y + B) ** 2) ** 1.5 / abs(2 * A)
+        return radius
+
+    # The best sanity checker
+    def check_good(self):
+        self.we_good = True
+
+    def fit_lane(self, image):
+        if self.we_good:
+            print("Reusing windows")
+            return self.find_next_lane_on_window(image)
+        else:
+            print("Searching new windows")
+            self.we_good = True
+            return self.sliding_fit_find_lanes(image)
 
     def sliding_fit_find_lanes(self, pipeline_image, nwindows=14):
         # 
@@ -196,19 +258,20 @@ class LaneFinder:
         self.left_fit = np.polyfit(lefty, leftx, 2)
         self.right_fit = np.polyfit(righty, rightx, 2)
 
+        self.left_fitx = self.left_fit[0]*self.ploty**2 + self.left_fit[1]*self.ploty + self.left_fit[2]
+        self.right_fitx = self.right_fit[0]*self.ploty**2 + self.right_fit[1]*self.ploty + self.right_fit[2]
+        
+
         out_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = [255, 0, 0]
         out_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 0, 255]
-        
-        cv2.imshow("Mapped", out_img)
+        return self.left_fit, self.right_fit, out_img
 
-        cv2.waitKey(1000)
-        return self.left_fit, self.right_fit
-
-    def find_next_lane_on_window(self, pipeline_image):
+    def find_next_lane_on_window(self, pipeline_image, margin=100):
         # Find lane lines in a 100px left-right margin around the last fit
         nonzero = pipeline_image.nonzero()
         nonzeroy = np.array(nonzero[0])
         nonzerox = np.array(nonzero[1])
+
         margin = 100
         left_lane_inds = ((nonzerox > (self.left_fit[0]*(nonzeroy**2) + self.left_fit[1]*nonzeroy + self.left_fit[2] - margin)) & (nonzerox < (self.left_fit[0]*(nonzeroy**2) + self.left_fit[1]*nonzeroy + self.left_fit[2] + margin))) 
         right_lane_inds = ((nonzerox > (self.right_fit[0]*(nonzeroy**2) + self.right_fit[1]*nonzeroy + self.right_fit[2] - margin)) & (nonzerox < (self.right_fit[0]*(nonzeroy**2) + self.right_fit[1]*nonzeroy + self.right_fit[2] + margin)))  
@@ -218,16 +281,19 @@ class LaneFinder:
         lefty = nonzeroy[left_lane_inds] 
         rightx = nonzerox[right_lane_inds]
         righty = nonzeroy[right_lane_inds]
+
         # Fit a second order polynomial to each
         self.left_fit = np.polyfit(lefty, leftx, 2)
         self.right_fit = np.polyfit(righty, rightx, 2)
-        return self.left_fit, self.right_fit
 
-    def draw_lane_regions(self, pipeline_image, nonzerox, nonzeroy, left_lane_inds, right_lane_inds):
+        self.left_fitx = self.left_fit[0]*self.ploty**2 + self.left_fit[1]*self.ploty + self.left_fit[2]
+        self.right_fitx = self.right_fit[0]*self.ploty**2 + self.right_fit[1]*self.ploty + self.right_fit[2]
+        
+        rendered = self.draw_lane_regions(pipeline_image, nonzerox, nonzeroy, left_lane_inds, right_lane_inds, margin)
+        return self.left_fit, self.right_fit, rendered
+
+    def draw_lane_regions(self, pipeline_image, nonzerox, nonzeroy, left_lane_inds, right_lane_inds, margin):
         # Generate x and y values for plotting
-        ploty = np.linspace(0, pipeline_image.shape[0]-1, pipeline_image.shape[0] )
-        left_fitx = self.left_fit[0]*ploty**2 + self.left_fit[1]*ploty + self.left_fit[2]
-        right_fitx = self.right_fit[0]*ploty**2 + self.right_fit[1]*ploty + self.right_fit[2]
 
         # Create an image to draw on and an image to show the selection window
         out_img = np.dstack((pipeline_image, pipeline_image, pipeline_image))*255
@@ -239,22 +305,38 @@ class LaneFinder:
 
         # Generate a polygon to illustrate the search window area
         # And recast the x and y points into usable format for cv2.fillPoly()
-        left_line_window1 = np.array([np.transpose(np.vstack([left_fitx-margin, ploty]))])
-        left_line_window2 = np.array([np.flipud(np.transpose(np.vstack([left_fitx+margin, ploty])))])
+        left_line_window1 = np.array([np.transpose(np.vstack([self.left_fitx-margin, self.ploty]))])
+        left_line_window2 = np.array([np.flipud(np.transpose(np.vstack([self.left_fitx+margin, self.ploty])))])
         left_line_pts = np.hstack((left_line_window1, left_line_window2))
 
-        right_line_window1 = np.array([np.transpose(np.vstack([right_fitx-margin, ploty]))])
-        right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([right_fitx+margin, ploty])))])
+        right_line_window1 = np.array([np.transpose(np.vstack([self.right_fitx-margin, self.ploty]))])
+        right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([self.right_fitx+margin, self.ploty])))])
         right_line_pts = np.hstack((right_line_window1, right_line_window2))
 
         # Draw the lane onto the warped blank image
         cv2.fillPoly(window_img, np.int_([left_line_pts]), (0,255, 0))
         cv2.fillPoly(window_img, np.int_([right_line_pts]), (0,255, 0))
         result = cv2.addWeighted(out_img, 1, window_img, 0.3, 0)
+        return result
 
-        cv2.imshow("Regions", result)
+    def draw_lane(self, image):
 
+        zeros_image = np.zeros((image.shape[0], image.shape[1])).astype(np.uint8)
+        color_image = np.dstack((zeros_image, zeros_image, zeros_image))
 
+        # Recast the x and y points into usable format for cv2.fillPoly()
+        pts_left = np.array([np.transpose(np.vstack([self.left_fitx, self.ploty]))])
+        pts_right = np.array([np.flipud(np.transpose(np.vstack([self.right_fitx, self.ploty])))])
+        pts = np.hstack((pts_left, pts_right))
+
+        # Draw the lane onto the warped blank image
+        cv2.fillPoly(color_image, np.int_([pts]), (0,255, 0))
+
+        # Warp the blank back to original image space using inverse perspective matrix (Minv)
+        newwarp = cv2.warpPerspective(color_image, INV_TRANSFORM, (image.shape[1], image.shape[0])) 
+        # Combine the result with the original image
+        result = cv2.addWeighted(image, 1, newwarp, 0.3, 0)
+        return result
 
 #
 # Entry point
@@ -267,22 +349,31 @@ with open("camera.p", "rb") as cam_f:
     mtx, dist = pickle.load(cam_f)
 
 
-def run_image(filename):
+lf = LaneFinder()
 
-    img = cv2.imread(filename)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
+def run_image(img):
     pipeline_image = process(img)
 
-    lf = LaneFinder()
-    
-    fitx, fity = lf.sliding_fit_find_lanes(pipeline_image)
-    print("Fit 1 X: ", fitx)
-    print("Fit 1 Y: ", fity)
+    fitl, fitr, fit_img = lf.fit_lane(pipeline_image)
 
-    fitx, fity = lf.find_next_lane_on_window(pipeline_image)
-    print("Fit 2 X: ", fitx)
-    print("Fit 2 Y: ", fity)
+    lane_img = lf.draw_lane(img)
+    lf.metric_fit()
 
-for f in os.listdir("./test_images"):
-    run_image("test_images/" + f)
+    cv2.imshow("Image", fit_img)
+    cv2.imshow("Lane", lane_img)
+    cv2.waitKey(3)
+
+    print("Fit L: ", fitl)
+    print("Fit R: ", fitr)
+
+
+    return lane_img
+
+# for f in os.listdir("./test_images"):
+#     img = cv2.imread("test_images/" + f)
+#     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+#     run_image(img)
+
+clip = VideoFileClip("project_video.mp4")
+output = clip.fl_image(run_image)
+output.write_videofile("output_images/test.mp4", audio=False)
