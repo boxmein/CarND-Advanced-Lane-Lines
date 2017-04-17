@@ -10,13 +10,18 @@ from collections import deque
 
 DEBUG = True
 
+# Distance average seems to be 600, so let's allow values from 600 - MAXDEV to 600 + MAXDEV
+DISTANCE_AVG = 600
+DISTANCE_MAXDEV = 90
+
 SAT_THRESH = (120, 255)
 LIG_THRESH = (40, 255) 
 SOBEL_ORIENT = 'x'
 SOBEL_THRESH = (12, 255)
 
-LANE_WIDTH = 3.7
-LANE_HEIGHT = 30
+IMAGE_WIDTH = 1280
+IMAGE_HEIGHT = 720
+
 
 TRANSFORM_SRC = np.array([
     [577, 464],
@@ -111,30 +116,18 @@ def process(image):
 class LaneFinder:
     def __init__(self):
         self.we_good = False
-        self.recent_xfitted = deque(maxlen=10)
-        self.left_fit = None
-        self.right_fit = None
+        self.left_fit = deque(maxlen=10)
+        self.right_fit = deque(maxlen=10)
+
+        self.left_fitx = None
+        self.right_fitx = None
         
         self.radius = None
         self.distance_from_line = None
 
         self.ploty = np.linspace(0, 719, 720 )
     
-    def get_best_fit(self):
-        
-        avgl = np.zeros(3)
-        avgr = np.zeros(3)
-
-        for lfit, rfit in recent_xfitted:
-            avgl += lfit
-            avgr += rfit
-        
-        avgl /= len(recent_xfitted)
-        avgr /= len(recent_xfitted)
-
-        return avgl, avgr
-    
-    def metric_fit(self):
+    def calculate_curvature(self):
         # Fit new polynomials to x,y in world space
         left_fit_cr = np.polyfit(self.ploty*Y_M_PX, self.left_fitx*X_M_PX, 2)
         right_fit_cr = np.polyfit(self.ploty*Y_M_PX, self.right_fitx*X_M_PX, 2)
@@ -145,6 +138,18 @@ class LaneFinder:
         print(left_curverad, 'm', right_curverad, 'm')
         # Example values: 632.1 m    626.2 m
         return left_curverad, right_curverad
+    
+    def distance_from_center(self, left_fitx, right_fitx):
+        xl = left_fitx[719]
+        xr = right_fitx[719]
+
+        lane_center = xr - xl / 2
+
+        dist = 1280 - lane_center
+
+        dist_m = dist * X_M_PX
+        return dist_m
+
 
     def find_curve_radius(self, fit, y=720):
         A, B, C = fit
@@ -152,17 +157,68 @@ class LaneFinder:
         return radius
 
     # The best sanity checker
-    def check_good(self):
-        self.we_good = True
+    def check_good(self, left_fit, right_fit, left_fitx, right_fitx):
+        if len(left_fit) == 0 or len(right_fit) == 0:
+            self.we_good = False
+            return
+
+        dA = abs(left_fit[0] - right_fit[0])
+        dB = abs(left_fit[1] - right_fit[1])
+        
+        l_lane_pos_ok = 150 < left_fit[2] < 600
+        r_lane_pos_ok = 550 < right_fit[2] < 1350
+
+        parallel_ok = dA < 0.01 and dB < 1
+        print("dA: {}, dB: {}, okay = {}".format(dA, dB, parallel_ok))
+
+        x1 = left_fitx[719]
+        x2 = right_fitx[719]
+
+        dist = abs(x1-x2)
+
+        distance_ok = 600 - 90 < dist < 600 + 90
+
+        print("x1: {}, x2: {}, dist: {}, okay = {}".format(x1, x2, dist, distance_ok))
+
+        self.we_good = parallel_ok and distance_ok and l_lane_pos_ok and r_lane_pos_ok
 
     def fit_lane(self, image):
+        if len(self.left_fit) > 0 and len(self.right_fit) > 0:
+            print("Current fit data:")
+            print(self.left_fit[0], self.right_fit[0])
+        else:
+            print("No fit data")
+
         if self.we_good:
             print("Reusing windows")
-            return self.find_next_lane_on_window(image)
+            lf = self.left_fit[0]
+            rf = self.right_fit[0]
+            left_fit, right_fit, fit_img, left_fitx, right_fitx = self.find_next_lane_on_window(image, lf, rf)
         else:
             print("Searching new windows")
-            self.we_good = True
-            return self.sliding_fit_find_lanes(image)
+            left_fit, right_fit, fit_img, left_fitx, right_fitx = self.sliding_fit_find_lanes(image)
+
+        self.check_good(left_fit, right_fit, left_fitx, right_fitx)
+        
+        if not self.we_good:
+            print("Re-searching with window method")
+            left_fit, right_fit, fit_img, left_fitx, right_fitx = self.sliding_fit_find_lanes(image)
+            self.check_good(left_fit, right_fit, left_fitx, right_fitx)
+        
+        if self.we_good:
+            print("Got good fit, adding")
+            self.left_fit.appendleft(left_fit)
+            self.right_fit.appendleft(right_fit)
+            self.left_fitx = left_fitx
+            self.right_fitx = right_fitx
+        
+        else:
+            print("Failed to get a good fit. Using earlier data.")
+
+        lf_out = np.mean(self.left_fit, axis=0)
+        rf_out = np.mean(self.right_fit, axis=0)
+
+        return lf_out, rf_out, fit_img
 
     def sliding_fit_find_lanes(self, pipeline_image, nwindows=14):
         # 
@@ -255,26 +311,26 @@ class LaneFinder:
 
         # Fit a second order polynomial to each
         
-        self.left_fit = np.polyfit(lefty, leftx, 2)
-        self.right_fit = np.polyfit(righty, rightx, 2)
+        left_fit = np.polyfit(lefty, leftx, 2)
+        right_fit = np.polyfit(righty, rightx, 2)
 
-        self.left_fitx = self.left_fit[0]*self.ploty**2 + self.left_fit[1]*self.ploty + self.left_fit[2]
-        self.right_fitx = self.right_fit[0]*self.ploty**2 + self.right_fit[1]*self.ploty + self.right_fit[2]
+        left_fitx = left_fit[0]*self.ploty**2 + left_fit[1]*self.ploty + left_fit[2]
+        right_fitx = right_fit[0]*self.ploty**2 + right_fit[1]*self.ploty + right_fit[2]
         
 
         out_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = [255, 0, 0]
         out_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 0, 255]
-        return self.left_fit, self.right_fit, out_img
+        return left_fit, right_fit, out_img, left_fitx, right_fitx
 
-    def find_next_lane_on_window(self, pipeline_image, margin=100):
+    def find_next_lane_on_window(self, pipeline_image, left_fit, right_fit, margin=100):
         # Find lane lines in a 100px left-right margin around the last fit
         nonzero = pipeline_image.nonzero()
         nonzeroy = np.array(nonzero[0])
         nonzerox = np.array(nonzero[1])
 
         margin = 100
-        left_lane_inds = ((nonzerox > (self.left_fit[0]*(nonzeroy**2) + self.left_fit[1]*nonzeroy + self.left_fit[2] - margin)) & (nonzerox < (self.left_fit[0]*(nonzeroy**2) + self.left_fit[1]*nonzeroy + self.left_fit[2] + margin))) 
-        right_lane_inds = ((nonzerox > (self.right_fit[0]*(nonzeroy**2) + self.right_fit[1]*nonzeroy + self.right_fit[2] - margin)) & (nonzerox < (self.right_fit[0]*(nonzeroy**2) + self.right_fit[1]*nonzeroy + self.right_fit[2] + margin)))  
+        left_lane_inds = ((nonzerox > (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + left_fit[2] - margin)) & (nonzerox < (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + left_fit[2] + margin))) 
+        right_lane_inds = ((nonzerox > (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] - margin)) & (nonzerox < (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] + margin)))  
 
         # Again, extract left and right line pixel positions
         leftx = nonzerox[left_lane_inds]
@@ -283,14 +339,14 @@ class LaneFinder:
         righty = nonzeroy[right_lane_inds]
 
         # Fit a second order polynomial to each
-        self.left_fit = np.polyfit(lefty, leftx, 2)
-        self.right_fit = np.polyfit(righty, rightx, 2)
+        left_fit = np.polyfit(lefty, leftx, 2)
+        right_fit = np.polyfit(righty, rightx, 2)
 
-        self.left_fitx = self.left_fit[0]*self.ploty**2 + self.left_fit[1]*self.ploty + self.left_fit[2]
-        self.right_fitx = self.right_fit[0]*self.ploty**2 + self.right_fit[1]*self.ploty + self.right_fit[2]
+        left_fitx = left_fit[0]*self.ploty**2 + left_fit[1]*self.ploty + left_fit[2]
+        right_fitx = right_fit[0]*self.ploty**2 + right_fit[1]*self.ploty + right_fit[2]
         
         rendered = self.draw_lane_regions(pipeline_image, nonzerox, nonzeroy, left_lane_inds, right_lane_inds, margin)
-        return self.left_fit, self.right_fit, rendered
+        return left_fit, right_fit, rendered, left_fitx, right_fitx
 
     def draw_lane_regions(self, pipeline_image, nonzerox, nonzeroy, left_lane_inds, right_lane_inds, margin):
         # Generate x and y values for plotting
@@ -319,18 +375,29 @@ class LaneFinder:
         result = cv2.addWeighted(out_img, 1, window_img, 0.3, 0)
         return result
 
-    def draw_lane(self, image):
-
+    def draw_lane(self, image, left_fit, right_fit, ):
+        if self.left_fitx is None or self.right_fitx is None:
+            print("wow cant draw lane")
+            return image
         zeros_image = np.zeros((image.shape[0], image.shape[1])).astype(np.uint8)
         color_image = np.dstack((zeros_image, zeros_image, zeros_image))
 
+        left_fitx = left_fit[0]*self.ploty**2 + left_fit[1]*self.ploty + left_fit[2]
+        right_fitx = right_fit[0]*self.ploty**2 + right_fit[1]*self.ploty + right_fit[2]
+
         # Recast the x and y points into usable format for cv2.fillPoly()
-        pts_left = np.array([np.transpose(np.vstack([self.left_fitx, self.ploty]))])
-        pts_right = np.array([np.flipud(np.transpose(np.vstack([self.right_fitx, self.ploty])))])
+        pts_left = np.array([np.transpose(np.vstack([left_fitx, self.ploty]))])
+        pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, self.ploty])))])
         pts = np.hstack((pts_left, pts_right))
 
         # Draw the lane onto the warped blank image
         cv2.fillPoly(color_image, np.int_([pts]), (0,255, 0))
+
+        # Draw text onto the screenie
+        cv2.putText(image,"L: {:.4f} {:.4f} {:.4f}".format(*left_fit), (0, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, 255)
+        cv2.putText(image,"R: {:.4f} {:.4f} {:.4f}".format(*right_fit), (0, 125), cv2.FONT_HERSHEY_SIMPLEX, 1, 255)
+        cv2.putText(image,"rX: {:.4f} rY: {:.4f}".format(*self.calculate_curvature()), (0, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, 255)
+        cv2.putText(image,"dist from center: {:.4f}m".format(self.distance_from_center(left_fitx, right_fitx)), (0, 175), cv2.FONT_HERSHEY_SIMPLEX, 1, 255)
 
         # Warp the blank back to original image space using inverse perspective matrix (Minv)
         newwarp = cv2.warpPerspective(color_image, INV_TRANSFORM, (image.shape[1], image.shape[0])) 
@@ -352,22 +419,21 @@ with open("camera.p", "rb") as cam_f:
 lf = LaneFinder()
 
 def run_image(img):
+    print("---- FIT LANE ----")
     pipeline_image = process(img)
 
     fitl, fitr, fit_img = lf.fit_lane(pipeline_image)
-
-    lane_img = lf.draw_lane(img)
-    lf.metric_fit()
-
+    
     cv2.imshow("Image", fit_img)
-    cv2.imshow("Lane", lane_img)
     cv2.waitKey(3)
 
-    print("Fit L: ", fitl)
-    print("Fit R: ", fitr)
+    print("Fit: ", fitl, fitr)
 
+    lane_img = lf.draw_lane(img, fitl, fitr)
+    cv2.imshow("Lane", lane_img)
 
     return lane_img
+
 
 # for f in os.listdir("./test_images"):
 #     img = cv2.imread("test_images/" + f)
