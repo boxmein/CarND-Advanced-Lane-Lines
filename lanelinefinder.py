@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Advanced Lane Line Finding
+# Johannes Kadak
+
+# Imports
 import numpy as np
 import cv2
 import pickle
@@ -8,21 +12,23 @@ from moviepy.editor import VideoFileClip
 from collections import deque
 
 
-DEBUG = True
-
 # Distance average seems to be 600, so let's allow values from 600 - MAXDEV to 600 + MAXDEV
 DISTANCE_AVG = 600
 DISTANCE_MAXDEV = 90
 
+# Saturation and lightness thresholds
 SAT_THRESH = (120, 255)
 LIG_THRESH = (40, 255) 
+
+# Sobel filter thresholds
 SOBEL_ORIENT = 'x'
 SOBEL_THRESH = (12, 255)
 
+# Image sizes passed into the finder, for reference
 IMAGE_WIDTH = 1280
 IMAGE_HEIGHT = 720
 
-
+# Transformation coordinates - source and destination
 TRANSFORM_SRC = np.array([
     [577, 464],
     [707, 464],
@@ -37,13 +43,24 @@ TRANSFORM_DST = np.array([
     [963, 720]
 ], dtype=np.float32)
 
+# Calculate transform matrices before time
 TRANSFORM = cv2.getPerspectiveTransform(TRANSFORM_SRC, TRANSFORM_DST)
 INV_TRANSFORM = cv2.getPerspectiveTransform(TRANSFORM_DST, TRANSFORM_SRC)
 
-Y_M_PX = 30/720 # meters per pixel in y dimension
-X_M_PX = 3.7/700 # meters per pixel in x dimension
+# Use example code pixel/meter constants
+
+# On the y-axis, meters/px
+Y_M_PX = 30/720
+# On the x-axis, meters/px
+X_M_PX = 3.7/700
 
 
+# 
+# Calculate the absolute Sobel threshold 
+# img : np.array(x, y) - the grayscaled image to threshold
+# orient : char        - Sobel orientation, either 'x' or 'y'
+# thresh : tuple(2)    - a tuple of (lower, upper) threshold from 0-255
+# returns the new masked image
 def abs_sobel_thresh(img, orient=SOBEL_ORIENT, thresh=SOBEL_THRESH):
     # Apply the following steps to img
     # 2) Take the derivative in x or y given orient = 'x' or 'y'
@@ -65,14 +82,29 @@ def abs_sobel_thresh(img, orient=SOBEL_ORIENT, thresh=SOBEL_THRESH):
     
     return mask
 
+# 
+# Take a threshold of the grayscaled image with lower and upper bounds
+# img : np.array(x, y) - the grayscaled image to threshold
+# thresh : tuple(2)    - a tuple of lower and upper thresholds from 0 to 255
+# returns the new thresholded image
 def thresh(img, thresh=SAT_THRESH):
     mask = np.zeros_like(img)
     mask[(img >= thresh[0]) & (img < thresh[1])] = 1
     return mask
 
+# 
+# Undistort an image using the camera matrices calculated/loaded ahead of time
+# The camera matrix must be stored as mtx, and the distribution vectors as dist.
+# returns the new undistorted image
 def undistort(image):
     return cv2.undistort(image, mtx, dist, None, mtx)
 
+#
+# Implement the full image threshold pipeline for detecting lane lines
+# Uses the Saturation and Lightness channels of the image to detect lane lines via thresholds. More details in the
+# writeup.
+# img : np.array(x, y, 3) - a RGB image
+# returns the new thresholded image
 def thresh_pipeline(img):
     hls   = cv2.cvtColor(img, cv2.COLOR_RGB2HLS)
     h_channel = hls[:,:,0]
@@ -89,13 +121,13 @@ def thresh_pipeline(img):
     print("Threshold result", mask.shape)
     return mask
 
+# 
+# Implements the entire transform pipeline to transform the perspective image into a birds-eye view image.
 def transform_pipeline(img):
     img = cv2.warpPerspective(img, TRANSFORM, (img.shape[1], img.shape[0]))
     return img
 
-
-
-
+# Process an image entirely by thresholding and transforming the image.
 def process(image):
     print("Undistorting", image.shape)
     image = undistort(image)
@@ -113,20 +145,30 @@ def process(image):
     cv2.imshow("Transform", img * 255)
     return img
 
+# The Lane Line Finding algorithm lives inside here.
+# It's a separate class because it keeps internal state.
 class LaneFinder:
     def __init__(self):
+
+        # True if the last frame was found to have a good fit
         self.we_good = False
+        
+        # A deque for left-lane fitting data in the form of np.array([A, B, C])
         self.left_fit = deque(maxlen=10)
+        # A deque for right-lane fitting data in the form of np.array([A, B, C])
         self.right_fit = deque(maxlen=10)
 
+        # X-coordinates for the left-fit polynomial. Used for generating imagery and calculating curvatures.
         self.left_fitx = None
+        # X-coordinates for the right-fit polynomial
         self.right_fitx = None
         
-        self.radius = None
-        self.distance_from_line = None
-
+        # A simple linear space from 0 to 719 to match the X-coordinates in the left/right fits
         self.ploty = np.linspace(0, 719, 720 )
     
+    # 
+    # Find the lane line curvature for the left and right lanes, in meters.
+    # Returns (left, right) the left and right curvatures in meters
     def calculate_curvature(self):
         # Fit new polynomials to x,y in world space
         left_fit_cr = np.polyfit(self.ploty*Y_M_PX, self.left_fitx*X_M_PX, 2)
@@ -139,24 +181,31 @@ class LaneFinder:
         # Example values: 632.1 m    626.2 m
         return left_curverad, right_curverad
     
+    #
+    # Find the car's / camera's distance from the center of the lane in meters.
+    # Assumes the camera center is dead center of the image (IMAGE_WIDTH / 2).
     def distance_from_center(self, left_fitx, right_fitx):
         xl = left_fitx[719]
         xr = right_fitx[719]
 
         lane_center = xr - xl / 2
 
-        dist = 1280 - lane_center
+        dist = (IMAGE_WIDTH/2.) - lane_center
 
         dist_m = dist * X_M_PX
         return dist_m
 
 
+    # Find the radius for a curve with coefficients (A, B, C) = fit
     def find_curve_radius(self, fit, y=720):
         A, B, C = fit
         radius = (1 + (2 * A * y + B) ** 2) ** 1.5 / abs(2 * A)
         return radius
 
-    # The best sanity checker
+    # Simply the best sanity checker. It's true.
+    # Detects if the lane polynomials make "sense" in the real world, as well.
+    # If the lanes are positioned logically, have similar curvature and are around 600 px apart, then the frame 
+    # is considered to be good.
     def check_good(self, left_fit, right_fit, left_fitx, right_fitx):
         if len(left_fit) == 0 or len(right_fit) == 0:
             self.we_good = False
@@ -181,14 +230,19 @@ class LaneFinder:
         print("x1: {}, x2: {}, dist: {}, okay = {}".format(x1, x2, dist, distance_ok))
 
         self.we_good = parallel_ok and distance_ok and l_lane_pos_ok and r_lane_pos_ok
-
+    
+    # Fit lane polynomials to the given image.
+    # Automatically decides between using sliding window search or using a reduced search area.
+    # If the reduced search area fails, falls back to sliding window search.
+    # Returns the mean of the last 10 frame fittings, which is very smooth for our purposes.
     def fit_lane(self, image):
         if len(self.left_fit) > 0 and len(self.right_fit) > 0:
             print("Current fit data:")
             print(self.left_fit[0], self.right_fit[0])
         else:
             print("No fit data")
-
+        
+        # If the last frame detected well, we can reuse the window data.
         if self.we_good:
             print("Reusing windows")
             lf = self.left_fit[0]
@@ -198,13 +252,16 @@ class LaneFinder:
             print("Searching new windows")
             left_fit, right_fit, fit_img, left_fitx, right_fitx = self.sliding_fit_find_lanes(image)
 
+        # Check if this frame detected well
         self.check_good(left_fit, right_fit, left_fitx, right_fitx)
         
+        # If it didn't give it a try with the sliding window method.
         if not self.we_good:
             print("Re-searching with window method")
             left_fit, right_fit, fit_img, left_fitx, right_fitx = self.sliding_fit_find_lanes(image)
             self.check_good(left_fit, right_fit, left_fitx, right_fitx)
         
+        # If we're good now, then save the data.
         if self.we_good:
             print("Got good fit, adding")
             self.left_fit.appendleft(left_fit)
@@ -215,15 +272,15 @@ class LaneFinder:
         else:
             print("Failed to get a good fit. Using earlier data.")
 
+        # Otherwise, simply output the mean data without the last frame's points.
         lf_out = np.mean(self.left_fit, axis=0)
         rf_out = np.mean(self.right_fit, axis=0)
 
         return lf_out, rf_out, fit_img
 
+    # Find lane lines using the Sliding Window method
+    # Slight edits aside, this code is pretty much the Udacity source.
     def sliding_fit_find_lanes(self, pipeline_image, nwindows=14):
-        # 
-        # Find approximate lane positions considering entire bottom half of image
-        # 
         
         # 1. Find lane pixel count per column over entire bottom half 
         #    - This gives us two peaks where lane lines were found
@@ -322,6 +379,8 @@ class LaneFinder:
         out_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 0, 255]
         return left_fit, right_fit, out_img, left_fitx, right_fitx
 
+    # Find the next lane when previous left and right fits exist
+    # Also pretty much the same as the Udacity source, adapted for my usage. 
     def find_next_lane_on_window(self, pipeline_image, left_fit, right_fit, margin=100):
         # Find lane lines in a 100px left-right margin around the last fit
         nonzero = pipeline_image.nonzero()
@@ -348,6 +407,9 @@ class LaneFinder:
         rendered = self.draw_lane_regions(pipeline_image, nonzerox, nonzeroy, left_lane_inds, right_lane_inds, margin)
         return left_fit, right_fit, rendered, left_fitx, right_fitx
 
+    # Output the lane regions by drawing two polygons for the left and right lanes, used when we can use reduced
+    # search area.
+    # Only used for debug purposes, because the drawn frame doesn't end up on the fit image
     def draw_lane_regions(self, pipeline_image, nonzerox, nonzeroy, left_lane_inds, right_lane_inds, margin):
         # Generate x and y values for plotting
 
@@ -374,10 +436,14 @@ class LaneFinder:
         cv2.fillPoly(window_img, np.int_([right_line_pts]), (0,255, 0))
         result = cv2.addWeighted(out_img, 1, window_img, 0.3, 0)
         return result
-
-    def draw_lane(self, image, left_fit, right_fit, ):
+    
+    
+    # Draw the valid driving region onto the driving image.
+    # Used in the end result for the green polygon covering the image.
+    def draw_lane(self, image, left_fit, right_fit):
+        # without calculating the X fits, can't draw the frame
         if self.left_fitx is None or self.right_fitx is None:
-            print("wow cant draw lane")
+            print("SANITY: can't draw frame without left/right fit X data")
             return image
         zeros_image = np.zeros((image.shape[0], image.shape[1])).astype(np.uint8)
         color_image = np.dstack((zeros_image, zeros_image, zeros_image))
@@ -409,15 +475,16 @@ class LaneFinder:
 # Entry point
 # 
 
-# Test on a few images
+# # Test on a few images
 
 
+# Load the pre-trained camera matrix. The code for it exists in the iPython notebook.
 with open("camera.p", "rb") as cam_f:
     mtx, dist = pickle.load(cam_f)
 
-
 lf = LaneFinder()
 
+# Find and draw lanes on a given image.
 def run_image(img):
     print("---- FIT LANE ----")
     pipeline_image = process(img)
@@ -434,12 +501,8 @@ def run_image(img):
 
     return lane_img
 
-
-# for f in os.listdir("./test_images"):
-#     img = cv2.imread("test_images/" + f)
-#     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-#     run_image(img)
-
-clip = VideoFileClip("project_video.mp4")
-output = clip.fl_image(run_image)
-output.write_videofile("output_images/test.mp4", audio=False)
+if __name__ == '__main__':
+    # Run the code on all images in this video.
+    clip = VideoFileClip("project_video.mp4")
+    output = clip.fl_image(run_image)
+    output.write_videofile("output_images/test.mp4", audio=False)
