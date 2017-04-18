@@ -20,7 +20,9 @@ the subsections, however.
 I had a lot of fun with this project, especially since the CV pipeline was much more predictable and easier to tweak
 than a neural net would be. Also, the testing cycle was much shorter due to its relatively fast runtime.
 
-![]
+![Project Video](output_images/lane_rendered.mp4) [(on YouTube)](https://youtu.be/GXFEEGQ2CdI)
+![Project Video - Lane Detector Running](output_images/lane_fitting.mp4) [(on YouTube)](https://youtu.be/tMZxmRCgmOw)
+![Harder Challenge Video - Horrible performance](output_images/harder_challenge_video.mp4) [(on YouTube)](https://youtu.be/IdgmndJVlDA)
 
 ---
 
