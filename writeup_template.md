@@ -113,7 +113,7 @@ In the pictures above ("Original Image" vs "Transformed Image"), it's visible th
 become parallel.
 
 
-####4. Describe how (and identify where in your code) you identified lane-line pixels and fit their positions with a polynomial?
+#### 4. Describe how (and identify where in your code) you identified lane-line pixels and fit their positions with a polynomial?
 
 The lane-line-pixel identification was broken into two sections:
 
@@ -141,14 +141,14 @@ The code for this method is contained in lanelinefinder.py lines 384-410.
 bunch of rectangles surrounding the lanes use the 1st method. When the sliding window search is being used, it means 
 that the previous frame's region did not result in useful lane line data.
 
-####5. Describe how (and identify where in your code) you calculated the radius of curvature of the lane and the position of the vehicle with respect to center.
+#### 5. Describe how (and identify where in your code) you calculated the radius of curvature of the lane and the position of the vehicle with respect to center.
 
 The curvature calculation simply maps one meter to a predefined amount of pixels and multiplies by this constant to
 find the amount of meters, then finding the curvature as a radius of the circle this parabola will create.
 
 The code for this method is contained in lanelinefinder.py lines 172-184.
 
-####6. Provide an example image of your result plotted back down onto the road such that the lane area is identified clearly.
+#### 6. Provide an example image of your result plotted back down onto the road such that the lane area is identified clearly.
 
 The lane lines are then plotted onto a rectangle and reverse-projected onto the lane line. The result of this is visible
 in this image, containing among other things the left and right radii and the distance from the center of the lane.
@@ -157,17 +157,17 @@ in this image, containing among other things the left and right radii and the di
 
 ---
 
-###Pipeline (video)
+### Pipeline (video)
 
-####1. Provide a link to your final video output.  Your pipeline should perform reasonably well on the entire project video (wobbly lines are ok but no catastrophic failures that would cause the car to drive off the road!).
+#### 1. Provide a link to your final video output.  Your pipeline should perform reasonably well on the entire project video (wobbly lines are ok but no catastrophic failures that would cause the car to drive off the road!).
 
 A video of the entire drive is available here: [video of the entire drive](output_images/lane_rendered.mp4). 
 
 ---
 
-###Discussion
+### Discussion
 
-####1. Briefly discuss any problems / issues you faced in your implementation of this project.  Where will your pipeline likely fail?  What could you do to make it more robust?
+#### 1. Briefly discuss any problems / issues you faced in your implementation of this project.  Where will your pipeline likely fail?  What could you do to make it more robust?
 
 I had the most problems getting my transformation right. I had taken the top coordinates of the transform too far back,
 meaning the ends of the lanes were spreading outward and filtering through rather badly. This led to an unstable fit 
